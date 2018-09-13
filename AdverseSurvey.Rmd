@@ -1,0 +1,691 @@
+---
+title: "AdverseSurveyCont"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load data
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(reshape2)
+library(caret)
+
+surveys <- read.csv('AdverseSurvey2.csv')
+```
+
+# Inspect
+
+```{r}
+str(surveys)
+```
+
+# Exploration
+
+```{r}
+surveys %>%
+  filter(FieldCode == 'ESSLCBEST') %>%
+  count(Friendly) %>%
+  mutate(Friendly = as.factor(recode(Friendly, E=0, G=1, S=2, P=3, N=4))) %>%
+  ggplot(aes(x = '', y = n, fill = Friendly)) +
+    geom_col(width = 1) +
+    scale_fill_manual(values = c('forestgreen','darkolivegreen3','yellow3','firebrick3','gray70')) +
+    coord_polar('y', start = pi/3) +
+    ggtitle('\'Friendly\' Perception', subtitle = 'What do we do best?') +
+    theme_minimal() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          legend.position = 'none')
+```
+
+```{r}
+surveys %>%
+  filter(FieldCode == 'ESSLCBEST') %>%
+  count(Organized) %>%
+  mutate(Organized = as.factor(recode(Organized, E=0, G=1, S=2, P=3, N=4))) %>%
+  ggplot(aes(x = '', y = n, fill = Organized)) +
+    geom_col(width = 1) +
+    scale_fill_manual(values = c('forestgreen','darkolivegreen3','yellow3','firebrick3','gray70')) +
+    coord_polar('y', start = pi/3) +
+    ggtitle('\'Organized\' Perception', subtitle = 'What do we do best?') +
+    theme_minimal() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          legend.position = 'none')
+```
+
+```{r}
+surveys %>%
+  filter(FieldCode == 'ESSLCBEST') %>%
+  count(Easier) %>%
+  mutate(Easier = as.factor(recode(Easier, E=0, G=1, S=2, P=3, N=4))) %>%
+  ggplot(aes(x = '', y = n, fill = Easier)) +
+    geom_col(width = 1) +
+    scale_fill_manual(values = c('forestgreen','darkolivegreen3','yellow3','firebrick3','gray70')) +
+    coord_polar('y', start = pi/3) +
+    ggtitle('\'Easier\' Perception', subtitle = 'What do we do best?') +
+    theme_minimal() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          legend.position = 'none')
+```
+
+```{r}
+surveys %>%
+  count(Overall) %>%
+  mutate(Overall = as.factor(recode(Overall, E=0, G=1, S=2, P=3, N=4))) %>%
+  ggplot(aes(x = '', y = n, fill = Overall)) +
+    geom_col(width = 1) +
+    scale_fill_manual(values = c('forestgreen','darkolivegreen3','yellow3','firebrick3','gray70')) +
+    coord_polar('y', start = pi/3) +
+    ggtitle('\'Overall\' Approval Ratings') +
+    theme_minimal() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          legend.position = 'none')
+```
+
+
+```{r}
+# nearly 50% of our customers aren't completely satisfied -- where is the least satisfaction coming from?
+
+surveys %>%
+  select(Friendly, Organized, Easier, Overall) %>%
+  gather('type','categories') %>%
+  select(categories, type) %>%
+  table() %>%
+  as_tibble() %>%
+  group_by(type) %>%
+  mutate(prop = round(n/sum(n), 3)*100) %>%
+  ggplot(aes(categories, prop)) +
+    geom_point(aes(color = categories), size = 2.5) +
+    geom_hline(yintercept = 52.6, color = 'chartreuse3', linetype = 'dashed') +
+    geom_hline(yintercept = 22.9, color = 'chartreuse', linetype = 'dashed') +
+    geom_hline(yintercept = 12.0, color = 'firebrick3', linetype = 'dashed') +
+    geom_hline(yintercept = 12.2, color = 'yellow3', linetype = 'dashed') +
+    scale_color_manual(name = 'Response:\t',
+                      labels = c('E' = 'Excellent\t','G' = 'Good\t','S' = 'Satisfactory\t','P' = 'Poor\t','N' = 'No Response\t'),
+                      values = c('E' = 'chartreuse3','G' = 'chartreuse','S' = 'yellow3','P' = 'firebrick3','N' = 'gray70')) +
+    scale_y_continuous(breaks = seq(0,60,10)) +
+    facet_wrap( ~ type, ncol = 4) +
+    theme_dark() +
+    theme(axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          legend.position = 'bottom',
+          legend.box = 'horizontal',
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_blank(),
+          panel.grid.minor.y = element_blank()) +
+    ylab('User Ratings\n')
+```
+
+# Make conversions
+
+```{r}
+#E = Excellent
+#G = Good
+#S = Satisfactory
+#P = Poor
+
+# 'customer' -> factor, then assign num
+# 'servicecode' -> factor, then assign num
+# 'doccode' -> num
+# 'receiveddate' -> date time, bin into quarters
+# 'fieldcode' -> break into best/better, join together
+# 'friendly', 'organized', 'easier', 'overall' -> scale to num
+# -1 from 'label' to change to 0/1 (bad/good)
+
+# remove: orderid, orderitemdocid, docreceivedtype, method, changedby, changeddate
+
+convert_ratings <- function(x){
+  x <- recode(x, E = 4, G = 3, S = 2, P = 1, N = 0)
+  x <- ifelse(x == 0, NA, x)
+}
+
+surveys %>%
+  select(-c(OrderId, OrderItemDocId, DocReceivedType, Method, ChangedBy, ChangedDate)) %>%
+  mutate(CustomerId = as.numeric(as.factor(CustomerId)),
+         ServiceCode = as.numeric(as.factor(ServiceCode)),
+         DocCode = as.numeric(DocCode),
+         ReceivedDate = mdy_hm(ReceivedDate),
+         YearQ = quarter(sub('\\s.*','',ReceivedDate), with_year = TRUE),
+         Year = sub('\\..','',YearQ),
+         Quarter = sub('.*\\.','',YearQ),
+         Label = ifelse(Label == 'Good', 1, 0),
+         Friendly = convert_ratings(Friendly),
+         Organized = convert_ratings(Organized),
+         Easier = convert_ratings(Easier),
+         Overall = convert_ratings(Overall)) %>%
+  head()
+
+# how to change factors for ML -- https://www.quora.com/Do-input-variables-for-neural-network-have-to-be-all-real-values
+# ID's -- turn into one-hot vector with SVD
+  # find values for ID's, then perform OHE
+  # CustomerId, OrderId, ServiceCode, OrderItemDocId
+# text -- word2vec or TF-IDF
+
+surveys2 <- surveys %>%
+  select(-c(OrderId, OrderItemDocId, Method, ChangedBy, ChangedDate)) %>%
+  mutate(CustomerId = as.factor(CustomerId),
+         ServiceCode = as.factor(ServiceCode),
+         ReceivedDate = mdy_hm(ReceivedDate),
+         YearQ = as.factor(quarter(sub('\\s.*','',ReceivedDate), with_year = TRUE)),
+         Year = as.factor(sub('\\..','',YearQ)),
+         Quarter = as.factor(sub('.*\\.','',YearQ)),
+         Label = ifelse(Label == 'Good', 1, 0))
+
+library(onehot)
+library(dummies)
+
+#test <- data.frame(predict(dummyVars(' ~ .', data = surveys2[1]), newdata = surveys2[1])) # best option yet
+#test2 <- onehot(select(surveys2, -c(Value)), max_levels = 50) # not as straight-forward
+#test3 <- model.matrix(~surveys2$CustomerId) # not bad, but not as clean
+#test4 <- dummy(surveys2$CustomerId, sep = '.') # same as our first option from 'caret', but simpler syntax
+#test5 <- predict(test2, surveys2) # -- follows our onehot example
+
+surveys.train <- cbind.data.frame(predict(onehot(select(surveys2, -c(ReceivedDate, Value, Label, Year, Quarter)), max_levels = 50), surveys2),
+                                  select(surveys2, Label))
+
+
+sample_size <- floor(.7*nrow(surveys.train))
+set.seed(302)
+train_ind <- sample(seq_len(nrow(surveys.train)), size = sample_size)
+train <- surveys.train[train_ind, ]
+test <- surveys.train[-train_ind, ]
+
+
+# Logit
+logistic <- glm(Label ~ ., data = surveys.train, family = 'binomial')
+summary(logistic)
+lm_error <- sqrt(mean(logistic$residuals^2))
+
+# try 2 for logistic
+lm <- glm(Label ~ CustomerId + DocReceivedType + DocCode + FieldCode + Friendly + Organized + Easier + Overall + YearQ, data = surveys2, family = 'binomial')
+null <- glm(Label ~ 1, data = surveys2, family = 'binomial')
+sqrt(mean(lm$residuals^2)); sqrt(mean(null$residuals^2))
+step(null, scope = list(lower = null, upper = lm), direction = 'forward')
+step(null, scope = list(upper = lm), data = surveys2, direction = 'both')
+logit_new <- glm(Label ~ Overall + Easier + Organized + FieldCode + Friendly + CustomerId + DocReceivedType, data = surveys2, family = 'binomial')
+sqrt(mean(logit_new$residuals^2))
+summary(logit_new)
+
+# SVM
+library(e1071)
+fit <- svm(Label ~ ., data = train)
+fit2 <- svm(Label ~ ., data = train, type = 'C-classification')
+summary(fit)
+preds <- predict(fit, select(test, -c(Label)))
+preds2 <- predict(fit2, select(test, -c(Label)))
+svm_error <- sqrt(mean((test$Label - preds)^2))
+table(preds2)
+
+plot(fit2, train)
+# compare results from preds2 to the Labels in the test set
+
+# Random Forest
+```
+
+# Fit a neural network
+
+```{r}
+# clean the data -- all values need to be numeric and on a normal scale (ideally 0-1)
+surveysnn <- surveys2 # copy data over
+surveysnn$Friendly <- ordered(surveysnn$Friendly, levels = c('N','P','S','G','E')) # reorder levels based on affinity
+surveysnn$Organized <- ordered(surveysnn$Organized, levels = c('N','P','S','G','E'))
+surveysnn$Easier <- ordered(surveysnn$Easier, levels = c('N','P','S','G','E'))
+surveysnn$Overall <- ordered(surveysnn$Overall, levels = c('N','P','S','G','E'))
+surveysnn$CustomerId <- relevel(surveysnn$CustomerId, ref = '100040')
+surveysnn$DocReceivedType <- relevel(surveysnn$DocReceivedType, ref = 'None')
+
+survey.matrix <- model.matrix(~ CustomerId + DocReceivedType + DocCode + FieldCode + Friendly + Organized + Easier + Overall + Label + YearQ, data = surveysnn) # create dummy variables
+
+colnames(survey.matrix) <- sub('\\.|\\^','',colnames(survey.matrix)) # clean names
+col_list <- paste(c(colnames(survey.matrix[,-c(1,34)])), collapse = '+') # drop intercept and 'Label' (y) -> create formula 'name'
+col_list <- paste(c('Label~', col_list), collapse = '')  
+f <- formula(col_list)
+
+# http://www.learnbymarketing.com/tutorials/neural-networks-in-r-tutorial/
+
+library(neuralnet)
+
+# setup training and testing set
+data <- survey.matrix %>%
+  as.data.frame() %>%
+  select(-c('(Intercept)'))
+
+sample_size <- floor(.7*nrow(data))
+set.seed(1997)
+train_ind <- sample(seq_len(nrow(data)), size = sample_size)
+train <- data[train_ind, ]
+test <- data[-train_ind, ]
+
+
+# fit a basic network -- note: 1 hidden layer is similar to linear regression -- try increasing hidden layers
+set.seed(1997)
+nn1 <- neuralnet(f, data = train)
+
+# attain output (predictions) by holding out the unnecessary columns
+output <- compute(nn1, test[,-c(33)])
+summary(output)
+plot(nn1) # visualize the computed NN
+
+# utilize predictions
+output1 <- (output$net.result * (max(data$Label) - min(data$Label))) + min(data$Label)
+plot(test$Label, output1, col = 'blue', pch = 16, ylab = 'Predicted Rating NN', xlab = 'Real Rating'); abline(0, 1)
+
+# ~ 0.278 RMSE (compare to 0.311 from SVM)
+nn.rmse <- sqrt(sum((test$Label - output1)^2) / nrow(test))
+
+# more layers should add more accuracy, even w/out changing other hyperparameters
+# re-run, but make sure to specify 'linear.output = FALSE' for classification (check what the default is)
+nn2 <- neuralnet(f, data = train, linear.output = FALSE)
+output2 <- compute(nn2, test[,-c(33)])
+output2 <- (output2$net.result * (max(data$Label) - min(data$Label))) + min(data$Label)
+plot(test$Label, output2, col = 'blue', pch = 16, ylab = 'Predicted Rating NN', xlab = 'Real Rating'); abline(0, 1)
+
+nn2.rmse <- sqrt(sum((test$Label - output2)^2) / nrow(test))
+
+nn3 <- neuralnet(f, data = train, hidden = 3, linear.output = FALSE)
+```
+
+# Sentiment analysis
+
+```{r}
+periods <- surveys2 %>%
+  distinct(YearQ) %>%
+  filter(!is.na(YearQ)) %>%
+  pull(YearQ) %>%
+  as.character()
+
+sentiment_quarters <- function(dat){
+  # we need to run this function for question type best and better SEPARATELY
+  
+  periods <- dat %>%
+    distinct(YearQ) %>%
+    filter(!is.na(YearQ)) %>%
+    pull(YearQ) %>%
+    as.character()
+  
+  q2016_3 <- subset(dat, YearQ == 2016.3)
+  q2016_4 <- subset(dat, YearQ == 2016.4)
+  q2017_1 <- subset(dat, YearQ == 2017.1)
+  q2017_2 <- subset(dat, YearQ == 2017.2)
+  q2017_3 <- subset(dat, YearQ == 2017.3)
+  q2017_4 <- subset(dat, YearQ == 2017.4)
+  q2018_1 <- subset(dat, YearQ == 2018.1)
+  q2018_2 <- subset(dat, YearQ == 2018.2)
+  q2018_3 <- subset(dat, YearQ == 2018.3)
+  
+  yearQ <- list(as.character(q2016_3$Value), as.character(q2016_4$Value),
+                as.character(q2017_1$Value), as.character(q2017_2$Value),
+                as.character(q2017_3$Value), as.character(q2017_4$Value),
+                as.character(q2018_1$Value), as.character(q2018_2$Value),
+                as.character(q2018_3$Value))
+  
+  full <- tibble()
+  
+  for(i in seq_along(periods)){
+    temp <- tibble(response = seq_along(yearQ[[i]]),
+                   text = yearQ[[i]]) %>%
+      tidytext::unnest_tokens(word, text) %>%
+      mutate(period = periods[i]) %>%
+      select(period, everything())
+    
+    full <- rbind(full, temp)
+  }
+  
+  full$period <- factor(full$period, levels = rev(periods))
+  
+  return(full)
+}
+
+library(tidytext)
+
+surveys2 %>%
+  filter(FieldCode == 'ESSLCBEST') %>%
+  sentiment_quarters() %>%
+  inner_join(get_sentiments('bing')) %>%
+  count(period, index = response %/% 50, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment_value = positive - negative) %>%
+  arrange(desc(period)) %>%
+  mutate(times = row_number()) %>%
+  ggplot(aes(times, sentiment_value)) +
+    theme_minimal() +
+    #ggtitle('How do LHI.Care customers feel about our services?') +
+    theme(axis.title.x = element_blank(),
+          #axis.title.y = element_text(angle = 0, vjust = .5),
+          plot.title = element_text(color = 'steelblue4', size = rel(1.5)),
+          axis.text.y = element_text(color = c('red','darkgreen'), size = rel(1.6))) +
+    scale_x_continuous(breaks = seq(5,130,15),
+                       labels = c('2016 Q3', '2016 Q4', '2017 Q1', '2017 Q2', '2017 Q3',
+                                  '2017 Q4', '2018 Q1', '2018 Q2', '2018 Q3')) +
+    scale_y_continuous('General Emotion',
+                       breaks = c(10, 40),
+                       labels = c('Negative','Positive')) +
+    geom_line(color = 'dodgerblue4', alpha = .4) +
+    geom_smooth(method = 'lm', color = 'firebrick3')
+
+#ggsave('BestSentiment.png', plot = last_plot())
+```
+
+```{r}
+# same thing but on our 'better' responses
+
+surveys2 %>%
+  filter(FieldCode == 'ESSLCBETTER') %>%
+  sentiment_quarters() %>%
+  inner_join(get_sentiments('bing')) %>%
+  count(period, index = response %/% 50, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment_value = positive - negative) %>%
+  arrange(desc(period)) %>%
+  mutate(times = row_number()) %>%
+  ggplot(aes(times, sentiment_value)) +
+    theme_minimal() +
+    #ggtitle('How do LHI.Care customers feel about our services?') +
+    theme(axis.title.x = element_blank(),
+          #axis.title.y = element_text(angle = 0, vjust = .5),
+          plot.title = element_text(color = 'steelblue4', size = rel(1.5)),
+          axis.text.y = element_text(color = c('red','darkgreen'), size = rel(1.6))) +
+    scale_x_continuous(breaks = seq(5,130,15),
+                       labels = c('2016 Q3', '2016 Q4', '2017 Q1', '2017 Q2', '2017 Q3',
+                                  '2017 Q4', '2018 Q1', '2018 Q2', '2018 Q3')) +
+    scale_y_continuous('General Emotion',
+                       breaks = c(0, 25),
+                       labels = c('Negative','Positive')) +
+    geom_line(color = 'dodgerblue4', alpha = .4) +
+    geom_smooth(method = 'lm', color = 'firebrick3')
+
+#ggsave('BetterSentiment.png', plot = last_plot())
+```
+
+# Look into what we can do better
+
+```{r}
+# only keep responses that give good feedback
+improve <- surveys2 %>%
+  filter(FieldCode == 'ESSLCBETTER') %>%
+  mutate(Value = tolower(Value)) %>% # convert to lowercase
+  mutate(Value = gsub('\\s{2,}','',Value)) %>% # remove excess spaces
+  mutate(Value = gsub('[[:punct:]]','',Value)) %>% # remove punctuation
+  mutate(Value = ifelse(grepl('\\s+',Value), Value, NA)) %>% # take out 1 word responses..not useful feedback
+  mutate(Value = gsub('good|great|best|nothing|no change|not sure',NA,Value)) %>% # take out responses that don't give recommendations
+  na.omit()
+
+library(udpipe); library(textrank)
+
+text_summary <- function(dat, all_quarters = FALSE, yyyy.q, data_limit = 300, num_sentences = 5){
+  # function to grab summary sentences from text 
+  # load textrank, udpipe, and textreuse
+  
+  # set up language model
+  #model <- udpipe_download_model(language = 'english') # only need to include on first entry
+  udmodel_english <- udpipe_load_model(file = 'english-ud-2.0-170801.udpipe')
+  
+  dat <- dat %>% mutate(Value = paste0(Value, '.')) # specify for the end of sentences
+  
+  ifelse(all_quarters, dat <- dat, dat <- filter(dat, YearQ == yyyy.q))
+  
+  # grab a random sample since we our summary function can't handle large documents
+  set.seed(3297)
+  if(nrow(dat) > data_limit)
+    dat <- dat %>% sample_n(data_limit)
+  
+  raw_text <- paste(dat$Value, collapse = '\n')
+  text_structure <- udpipe_annotate(udmodel_english, raw_text) %>% as.data.frame()
+  
+  # keyword extraction
+  keywords <- textrank_keywords(text_structure$lemma, relevant = text_structure$upos %in% c('NOUN','VERB','ADJ'))
+  
+  # define sentences
+  sentences <- unique(text_structure[,c('sentence_id','sentence')])
+  terms <- subset(text_structure, upos %in% c('NOUN','ADJ'))
+  terms <- terms[,c('sentence_id','lemma')]
+  
+  # improve computation time, but also limits code entry
+  #minhash <- minhash_generator(n = 1000, seed = 3297)
+  #candidates <- textrank_candidates_lsh(x = terms$lemma, sentence_id = terms$sentence_id, minhashFUN = minhash, bands = 500)
+  
+  # apply ranking algorithm
+  #summary_sentences <- textrank_sentences(data = sentences, terminology = terms, textrank_candidates = candidates)
+  summary_sentences <- textrank_sentences(data = sentences, terminology =  terms)
+  
+  # return summary sentences to show progress
+  cat(summary(summary_sentences, n = num_sentences, keep.sentence.order = TRUE), sep = '\n')
+  # store in list
+  top_sentences <- summary(summary_sentences, n = num_sentences, keep.sentence.order = TRUE)
+}
+
+# text_summary(improve, yyyy.q = 2017.3) # test for time duration
+
+complete.summary <- text_summary(improve, all_quarters = TRUE, data_limit = 2000)
+
+# Match statements with a date and customer
+improve %>%
+  filter(Value %in% gsub('\\.$','',complete.summary))
+```
+
+# Feature engineering from text mining
+
+```{r}
+text.only <- select(surveys2, c(Value, Label))
+
+# extract num words and string length from review
+# 'good|great|best|nothing|no change|not sure'
+text.only <- text.only %>%
+  mutate(Value = tolower(Value),
+         Value = gsub('[[:punct:]]','',Value),
+         Value = gsub('\\s{2,}',' ',Value),
+         NumWords = str_count(Value, pattern = '\\s+') + 1,
+         NumChars = str_count(Value),
+         Useful = ifelse(Value %in% c('good','great','best','nothing','no change','not sure'), 0, 1),
+         Sophisticated = round((NumChars/NumWords)*Useful,2))
+
+text.only2 <- text.only %>%
+  summarise(surveytext = toString(Value)) %>%
+  mutate(surveytext = lemmatize_strings(surveytext))
+
+library(tm); library(textstem)
+
+text.corp <- Corpus(VectorSource(text.only$Value)) %>%
+  #tm_map(removePunctuation) %>%
+  #tm_map(tolower) %>%
+  tm_map(stripWhitespace) %>%
+  tm_map(removeWords, c(stopwords('en'))) %>%
+  tm_map(stemDocument, language = 'english')
+
+head(as.character(text.corp[[1]]))
+
+docterms <- DocumentTermMatrix(text.corp)
+dim(docterms)
+# too large to deal with -- remove variables that are 97.5%+ sparse
+docterms <- removeSparseTerms(docterms, sparse = 0.95)
+dim(docterms)
+
+text.processed <- as.data.frame(as.matrix(docterms))
+comb <- cbind(data.table(Label = text.only$Label), text.processed)
+comb <- cbind(text.only, text.processed)
+
+data.complete <- cbind(surveys2, select(comb, -c(Value, Label)))
+```
+
+# Now train
+
+```{r}
+# clean the data -- all values need to be numeric and on a normal scale (ideally 0-1)
+surveysnn <- data.complete # copy data over
+
+surveysnn <- surveysnn %>%
+  mutate(Friendly = recode(Friendly, E = 4, G = 3, S = 2, P = 1, N = 0),
+         Organized = recode(Organized, E = 4, G = 3, S = 2, P = 1, N = 0),
+         Easier = recode(Easier, E = 4, G = 3, S = 2, P = 1, N = 0),
+         Overall = recode(Overall, E = 4, G = 3, S = 2, P = 1, N = 0))
+
+#surveysnn$Friendly <- ordered(surveysnn$Friendly, levels = c('N','P','S','G','E')) # reorder levels based on affinity
+#surveysnn$Organized <- ordered(surveysnn$Organized, levels = c('N','P','S','G','E'))
+#surveysnn$Easier <- ordered(surveysnn$Easier, levels = c('N','P','S','G','E'))
+#surveysnn$Overall <- ordered(surveysnn$Overall, levels = c('N','P','S','G','E'))
+
+surveysnn$CustomerId <- relevel(surveysnn$CustomerId, ref = '100040')
+surveysnn$DocReceivedType <- relevel(surveysnn$DocReceivedType, ref = 'None')
+
+keeps <- paste(c(colnames(surveysnn[,-c(2,5,11,14)])), collapse = '+')
+keeps <- formula(paste(c('~', keeps), collapse = ''))
+
+survey.matrix <- model.matrix(keeps, data = surveysnn) # create dummy variables
+
+colnames(survey.matrix) <- sub('\\.|\\^','',colnames(survey.matrix)) # clean names
+col_list <- paste(c(colnames(survey.matrix[,-c(1,22)])), collapse = '+') # drop intercept and 'Label' (y) -> create formula 'name'
+col_list <- formula(paste(c('Label~', col_list), collapse = ''))
+
+# http://www.learnbymarketing.com/tutorials/neural-networks-in-r-tutorial/
+
+library(neuralnet)
+
+# setup training and testing set
+data <- survey.matrix %>%
+  as.data.frame() %>%
+  select(-c('(Intercept)'))
+
+sample_size <- floor(.7*nrow(data))
+set.seed(1997)
+train_ind <- sample(seq_len(nrow(data)), size = sample_size)
+train <- data[train_ind, ]
+test <- data[-train_ind, ]
+
+
+# fit a basic network -- note: 1 hidden layer is similar to linear regression -- try increasing hidden layers
+set.seed(1997)
+nn1 <- neuralnet(col_list, data = train, linear.output = FALSE, stepmax = 1e+06, threshold = 0.3, lifesign = 'full')
+
+# attain output (predictions) by holding out the unnecessary columns
+output <- compute(nn1, test[,-c(33)])
+summary(output)
+plot(nn1) # visualize the computed NN
+
+# utilize predictions
+output1 <- (output$net.result * (max(data$Label) - min(data$Label))) + min(data$Label)
+plot(test$Label, output1, col = 'blue', pch = 16, ylab = 'Predicted Rating NN', xlab = 'Real Rating'); abline(0, 1)
+
+# ~ 0.278 RMSE (compare to 0.311 from SVM)
+nn.rmse <- sqrt(sum((test$Label - output1)^2) / nrow(test))
+
+# more layers should add more accuracy, even w/out changing other hyperparameters
+# re-run, but make sure to specify 'linear.output = FALSE' for classification (check what the default is)
+nn2 <- neuralnet(f, data = train, linear.output = FALSE)
+output2 <- compute(nn2, test[,-c(33)])
+output2 <- (output2$net.result * (max(data$Label) - min(data$Label))) + min(data$Label)
+plot(test$Label, output2, col = 'blue', pch = 16, ylab = 'Predicted Rating NN', xlab = 'Real Rating'); abline(0, 1)
+
+nn2.rmse <- sqrt(sum((test$Label - output2)^2) / nrow(test))
+
+nn3 <- neuralnet(f, data = train, hidden = 3, linear.output = FALSE)
+
+# https://www.hackerearth.com/practice/machine-learning/advanced-techniques/text-mining-feature-engineering-r/tutorial/
+```
+
+# Trying a decision tree
+
+Should provide good visualization for where we can suggest focus on improvements.
+
+```{r}
+library(rpart)
+library(rpart.plot)
+
+lapply(surveys2[,-c(11)], levels) # inspect factor levels
+
+surveysclean <- surveys2 # copy data over
+surveysclean$Friendly <- ordered(surveysclean$Friendly, levels = c('N','P','S','G','E')) # reorder levels based on affinity
+surveysclean$Organized <- ordered(surveysclean$Organized, levels = c('N','P','S','G','E'))
+surveysclean$Easier <- ordered(surveysclean$Easier, levels = c('N','P','S','G','E'))
+surveysclean$Overall <- ordered(surveysclean$Overall, levels = c('N','P','S','G','E'))
+surveysclean$YearQ <- ordered(surveysclean$YearQ)
+surveysclean$Year <- ordered(surveysclean$Year)
+surveysclean$Quarter <- ordered(surveysclean$Quarter)
+
+surveysclean <- select(surveysclean, -c(ServiceCode, ReceivedDate, Value))
+
+samp.size <- floor(.7*nrow(surveysclean))
+set.seed(1997)
+indices <- sample(seq_len(nrow(surveysclean)), size = samp.size)
+clean.train <- surveysclean[indices,]
+clean.test <- surveysclean[-indices,]
+  
+tree1 <- rpart(Label ~ ., data = clean.train, method = 'class')
+rpart.plot(tree1)
+summary(tree1)
+tree.preds <- predict(tree1, select(clean.test, -c(Label)))
+```
+
+Very good on our last result. Obviously those who don't rate us, or rate us as "poor" or "satisfactory" are going to be labeled as "bad". Let's check if we can predict what the overall will be, based on other factors.
+
+```{r}
+score <- select(clean.train, -c(Label))
+tree2 <- rpart(Overall ~ ., data = score)
+rpart.plot(tree2, type = 4)
+
+# interesting. very interesting.
+# Interpretation:
+rpart.rules(tree2)
+#   75% rate "poor" when 'Easier' is "poor"
+#   96% rate "poor" when 'Easier' is "poor"
+
+#   If we attain "good" or higher on 'Easier', only 12% rate below "good" overall
+#   91% rate "excellent" when 'Easier' is "excellent"
+```
+
+Now look into probability distributions with contingency tables and methodology testing.
+
+```{r}
+# isolate question categories and remove null responses
+ratings <- select(surveysclean, c(Friendly, Organized, Easier, Overall))
+
+ratings <- surveysclean %>%
+  select(Friendly, Organized, Easier, Overall) %>%
+  subset(Friendly != 'N' & Organized != 'N' & Easier != 'N' & Overall != 'N') %>%
+  droplevels()
+
+glimpse(ratings)
+
+# 'easier' is best predictor of 'overall'
+t.tab <- with(ratings, table(Easier, Overall))
+addmargins(t.tab)
+```
+
+```{r}
+# visualize 4x4 contingency table
+library(ggmosaic)
+
+ggplot(ratings) +
+  geom_mosaic(aes(x = product(Overall), fill = Easier)) +
+  theme_minimal() +
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 10, face = 'bold'),
+        panel.grid = element_blank()) +
+  scale_fill_manual(values = c('P' = 'indianred3', 'S' = 'yellow2', 'G' = 'darkolivegreen2', 'E' = 'darkolivegreen4')) +
+  labs(x = '\nOverall', y = 'Easier\n')
+```
+
+```{r}
+# https://cran.r-project.org/web/packages/vcdExtra/vignettes/vcd-tutorial.pdf
+
+# Chi-Square is powerful, but mainly used for nominal data
+chisq.test(t.tab)
+
+# try out Cochran-Mantel-Haenszel test instead (for ordinal factors)
+library(vcdExtra)
+CMHtest(t.tab)
+
+assocstats(t.tab)
+
+library(ca)
+ca(t.tab)
+plot(ca(t.tab), main = 'Easier and Overall')
+```
+
